@@ -243,9 +243,25 @@ static gboolean
 gst_inferencefilter_transform_meta (GstBaseTransform * trans,
     GstBuffer * outbuf, GstMeta * meta, GstBuffer * inbuf)
 {
+  GstInferenceMeta * infmeta;
+  gboolean ret = TRUE;
+
   GstInferencefilter *inferencefilter = GST_INFERENCEFILTER (trans);
-  GST_DEBUG_OBJECT (inferencefilter, "transform_ip");
-  return TRUE;
+  GST_DEBUG_OBJECT (inferencefilter, "transform_meta");
+
+  infmeta =
+    (GstInferenceMeta *) gst_buffer_get_meta (inbuf,
+                                              GST_INFERENCE_META_API_TYPE);
+
+  if (NULL == infmeta) {
+    GST_LOG_OBJECT (inferencefilter, "No inference meta found. Buffer passthrough.");
+    gst_base_transform_set_passthrough (trans, TRUE);
+    goto out;
+  }
+
+ out:
+  return ret;
+
 }
 
 static GstFlowReturn
