@@ -64,7 +64,7 @@ static void gst_inferencefilter_get_property (GObject * object,
 static gboolean gst_inferencefilter_start (GstBaseTransform * trans);
 static gboolean gst_inferencefilter_stop (GstBaseTransform * trans);
 static void gst_inferencefilter_finalize (GObject * object);
-
+static gboolean gst_inferencefilter_filter_enable(GstInferencefilter * inferencefilter, Prediction *rot, gint label, gboolean reset);
 static gboolean gst_inferencefilter_transform_meta (GstBaseTransform * trans,
     GstBuffer * outbuf, GstMeta * meta, GstBuffer * inbuf);
 static GstFlowReturn gst_inferencefilter_transform_ip (GstBaseTransform * trans,
@@ -238,6 +238,30 @@ gst_inferencefilter_finalize (GObject * object)
   G_OBJECT_CLASS (gst_inferencefilter_parent_class)->finalize (object);
 }
 
+static gboolean
+gst_inferencefilter_filter_enable (GstInferencefilter * inferencefilter, Prediction *root, gint label, gboolean reset)
+{
+  gint i;
+  GST_DEBUG_OBJECT (inferencefilter, "filter_enable");
+  gboolean ret = TRUE;
+
+  if (root == NULL || root->box == NULL) {
+    GST_ERROR_OBJECT (inferencefilter, "Invalid prediction from inference meta.");
+    ret = FALSE;
+  }
+
+  if(root->box->label == label || reset) {
+    root->enabled=TRUE;
+  } else {
+    root->enabled=FALSE;
+  }
+
+  for (i = 0; i < root->num_predictions ; ++i) {
+    Prediction   *predict = &root->predictions[i];
+    ret = gst_inferencefilter_filter_enable (inferencefilter, predict, label, reset);
+  }
+  return ret;
+}
 
 static gboolean
 gst_inferencefilter_transform_meta (GstBaseTransform * trans,
@@ -257,6 +281,13 @@ gst_inferencefilter_transform_meta (GstBaseTransform * trans,
     GST_LOG_OBJECT (inferencefilter, "No inference meta found. Buffer passthrough.");
     gst_base_transform_set_passthrough (trans, TRUE);
     goto out;
+  }
+
+  if (inferencefilter->filter_class < 0 && !inferencefilter->reset_enable) {
+    GST_ERROR_OBJECT (inferencefilter, "Invalid class label");
+    ret = FALSE;
+  } else {
+    ret = gst_inferencefilter_filter_enable (inferencefilter, infmeta->prediction, inferencefilter->filter_class, inferencefilter->reset_enable);
   }
 
  out:
