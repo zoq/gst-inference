@@ -18,23 +18,29 @@ static gboolean gst_inference_meta_init (GstMeta * meta,
     gpointer params, GstBuffer * buffer);
 static void gst_inference_meta_free (GstMeta * meta, GstBuffer * buffer);
 static gboolean gst_inference_clean_nodes (GNode * node, gpointer data);
-static gboolean gst_classification_meta_init (GstMeta * meta,
-    gpointer params, GstBuffer * buffer);
-static void gst_classification_meta_free (GstMeta * meta, GstBuffer * buffer);
+static gboolean gst_inference_meta_transform (GstBuffer * transbuf,
+    GstMeta * meta, GstBuffer * buffer, GQuark type, gpointer data);
+/* static void gst_inference_children_copy (GNode * node, gpointer data); */
+static gboolean gst_inference_meta_transfer (GstBuffer * transbuf,
+    GstMeta * meta, GstBuffer * buffer, GstVideoMetaTransform * data);
+
 static void gst_detection_meta_free (GstMeta * meta, GstBuffer * buffer);
 static gboolean gst_detection_meta_init (GstMeta * meta,
     gpointer params, GstBuffer * buffer);
 static gboolean gst_detection_meta_transform (GstBuffer * transbuf,
     GstMeta * meta, GstBuffer * buffer, GQuark type, gpointer data);
-static gboolean gst_classification_meta_transform (GstBuffer * dest,
-    GstMeta * meta, GstBuffer * buffer, GQuark type, gpointer data);
-
 static gboolean gst_detection_meta_copy (GstBuffer * transbuf,
     GstMeta * meta, GstBuffer * buffer);
 static gboolean gst_detection_meta_scale (GstBuffer * transbuf,
     GstMeta * meta, GstBuffer * buffer, GstVideoMetaTransform * data);
+
+static gboolean gst_classification_meta_transform (GstBuffer * dest,
+    GstMeta * meta, GstBuffer * buffer, GQuark type, gpointer data);
 static gboolean gst_classification_meta_copy (GstBuffer * transbuf,
     GstMeta * meta, GstBuffer * buffer);
+static gboolean gst_classification_meta_init (GstMeta * meta,
+    gpointer params, GstBuffer * buffer);
+static void gst_classification_meta_free (GstMeta * meta, GstBuffer * buffer);
 
 GType
 gst_inference_meta_api_get_type (void)
@@ -62,7 +68,7 @@ gst_inference_meta_get_info (void)
     const GstMetaInfo *meta = gst_meta_register (GST_INFERENCE_META_API_TYPE,
         "GstInferenceMeta", sizeof (GstInferenceMeta),
         gst_inference_meta_init, gst_inference_meta_free,
-        NULL);
+        gst_inference_meta_transform);
     g_once_init_leave (&inference_meta_info, meta);
   }
   return inference_meta_info;
@@ -431,4 +437,139 @@ gst_inference_meta_free (GstMeta * meta, GstBuffer * buffer)
   g_node_traverse (root->node, G_LEVEL_ORDER, G_TRAVERSE_ALL, -1,
       gst_inference_clean_nodes, NULL);
   g_node_destroy (root->node);
+}
+
+static void
+gst_inference_class_copy (gpointer data, gpointer user_data)
+{
+  Classification *class = (Classification *) data;
+  Prediction *target = (Prediction *) user_data;
+  Classification *new_class = NULL;
+
+  g_return_if_fail (class != NULL);
+  g_return_if_fail (target != NULL);
+
+  /* Allocate new Classification */
+  new_class = g_malloc (sizeof (Classification));
+  new_class->class_id = class->class_id;
+  new_class->class_prob = class->class_prob;
+  new_class->num_classes = class->num_classes;
+  new_class->class_label = g_strdup (class->class_label);
+  if (class->num_classes > 0) {
+    new_class->classes_probs = g_malloc (class->num_classes * sizeof (gdouble));
+    memcpy (new_class->classes_probs, class->classes_probs,
+        class->num_classes * sizeof (gdouble));
+  }
+}
+
+static Prediction *
+gst_inference_prediction_copy (Prediction * src, Prediction * dest)
+{
+  g_return_val_if_fail (src != NULL, FALSE);
+
+  if (!dest) {
+    /* Allocate new Prediction */
+    dest = g_malloc (sizeof (Prediction));
+    dest->box = NULL;
+    dest->classifications = NULL;
+    dest->node = g_node_new (dest);
+  }
+
+  dest->id = src->id;
+  dest->enabled = src->enabled;
+
+  /* Copy BBox if needed */
+  if (src->box) {
+    if (dest->box)
+      g_free (dest->box);
+    dest->box = g_malloc (sizeof (BBox));
+    memcpy (dest->box, src->box, sizeof (BBox));
+  }
+
+  if (src->classifications) {
+    g_list_foreach (src->classifications, gst_inference_class_copy,
+        (gpointer) dest);
+  }
+
+  return dest;
+}
+
+static void
+gst_inference_children_copy (GNode * node, gpointer data)
+{
+  GNode *dest_node = (GNode *) data;
+  GNode *new_node = NULL;
+  Prediction *new_root = NULL;
+
+  g_return_if_fail (dest_node != NULL);
+
+  new_root =
+      gst_inference_prediction_copy ((Prediction *) node->data, new_root);
+
+  if (new_root) {
+    new_node = new_root->node;
+    g_node_append (dest_node, new_node);
+
+    /* Copy node children recursively */
+    g_node_children_foreach (node, G_TRAVERSE_ALL, gst_inference_children_copy,
+        new_node);
+  }
+}
+
+static gboolean
+gst_inference_meta_transfer (GstBuffer * dest,
+    GstMeta * meta, GstBuffer * buffer, GstVideoMetaTransform * trans)
+{
+  GstInferenceMeta *dmeta, *smeta;
+
+  g_return_val_if_fail (dest, FALSE);
+  g_return_val_if_fail (meta, FALSE);
+  g_return_val_if_fail (buffer, FALSE);
+  g_return_val_if_fail (trans, FALSE);
+
+  smeta = (GstInferenceMeta *) meta;
+  dmeta =
+      (GstInferenceMeta *) gst_buffer_get_meta (dest,
+      GST_INFERENCE_META_API_TYPE);
+
+  if (!dmeta) {
+    /* If meta doesn't exist, copy it */
+    Prediction *root = smeta->prediction;
+    dmeta =
+        (GstInferenceMeta *) gst_buffer_add_meta (dest, GST_INFERENCE_META_INFO,
+        NULL);
+
+    /* Copy root Prediction first */
+    dmeta->prediction = gst_inference_prediction_copy (root, dmeta->prediction);
+    if (!dmeta->prediction) {
+      GST_ERROR ("Prediction copy failed");
+      return FALSE;
+    } else {
+      Prediction *droot = dmeta->prediction;
+
+      /* Copy node children recursively */
+      g_node_children_foreach (root->node, G_TRAVERSE_ALL,
+          gst_inference_children_copy, droot->node);
+    }
+  } else {
+    /* TODO: Transfer the meta */
+  }
+
+  return TRUE;
+}
+
+
+static gboolean
+gst_inference_meta_transform (GstBuffer * dest, GstMeta * meta,
+    GstBuffer * buffer, GQuark type, gpointer data)
+{
+  GST_LOG ("Transforming inference metadata");
+
+  if (GST_VIDEO_META_TRANSFORM_IS_SCALE (type)) {
+    GstVideoMetaTransform *trans = (GstVideoMetaTransform *) data;
+    return gst_inference_meta_transfer (dest, meta, buffer, trans);
+  }
+
+  /* No transform supported */
+  return FALSE;
 }

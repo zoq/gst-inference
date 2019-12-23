@@ -920,6 +920,9 @@ gst_video_inference_postprocess (GstVideoInference * self,
       GstVideoFrame *pbpass = buffer_bypass ? &frame_bypass : NULL;
 
       /* TODO: Transfer model meta to bypass */
+      meta_bypass =
+          video_inference_transform_meta (buffer_model, info_model, meta_model,
+          buffer_bypass, info_bypass);
 
       g_signal_emit (self, gst_video_inference_signals[NEW_INFERENCE_SIGNAL], 0,
           meta_model, &frame_model, meta_bypass, pbpass);
