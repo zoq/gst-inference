@@ -18,6 +18,7 @@ static gboolean gst_inference_meta_init (GstMeta * meta,
     gpointer params, GstBuffer * buffer);
 static void gst_inference_meta_free (GstMeta * meta, GstBuffer * buffer);
 static gboolean gst_inference_clean_nodes (GNode * node, gpointer data);
+static gboolean gst_inference_transfer_prediction (GNode * node, gpointer data);
 static gboolean gst_inference_meta_transform (GstBuffer * transbuf,
     GstMeta * meta, GstBuffer * buffer, GQuark type, gpointer data);
 /* static void gst_inference_children_copy (GNode * node, gpointer data); */
@@ -517,10 +518,61 @@ gst_inference_children_copy (GNode * node, gpointer data)
 }
 
 static gboolean
+gst_inference_transfer_prediction (GNode * node, gpointer data)
+{
+  GNode *snode = (GNode *) data;
+  Prediction *sroot;
+  Prediction *droot = (Prediction *) node->data;
+
+  g_return_val_if_fail (snode != NULL, TRUE);
+  g_return_val_if_fail (droot != NULL, TRUE);
+
+  sroot = (Prediction *) snode->data;
+
+  /* Transfer prediction only if ID is the same */
+  if (sroot->id == droot->id) {
+    guint src_n_child = g_node_n_children (snode);
+    guint dest_n_child = g_node_n_children (node);
+
+    node->data = (gpointer) gst_inference_prediction_copy (sroot, droot);
+
+    /* Transfer children nodes */
+    for (gint i = 0; i < src_n_child; i++) {
+      gboolean exists = FALSE;
+      GNode *src_nchild = g_node_nth_child (snode, i);
+      Prediction *src_pchild = (Prediction *) src_nchild->data;
+
+      for (gint n = 0; i < dest_n_child; i++) {
+        GNode *dest_nchild = g_node_nth_child (node, n);
+        Prediction *dest_pchild = (Prediction *) dest_nchild->data;
+
+        /* Check if destination node already has this child, if not, we copy it */
+        if (dest_pchild->id == src_pchild->id) {
+          exists = TRUE;
+          break;
+        }
+      }
+      if (!exists) {
+        Prediction *new_prediction = NULL;
+
+        /* Copy prediction and add it to parent node */
+        new_prediction =
+            gst_inference_prediction_copy (src_pchild, new_prediction);
+        g_node_append (node, new_prediction->node);
+      }
+    }
+  }
+
+  return FALSE;
+}
+
+
+static gboolean
 gst_inference_meta_transfer (GstBuffer * dest,
     GstMeta * meta, GstBuffer * buffer, GstVideoMetaTransform * trans)
 {
   GstInferenceMeta *dmeta, *smeta;
+  Prediction *droot, *sroot;
 
   g_return_val_if_fail (dest, FALSE);
   g_return_val_if_fail (meta, FALSE);
@@ -528,19 +580,21 @@ gst_inference_meta_transfer (GstBuffer * dest,
   g_return_val_if_fail (trans, FALSE);
 
   smeta = (GstInferenceMeta *) meta;
+  sroot = smeta->prediction;
   dmeta =
       (GstInferenceMeta *) gst_buffer_get_meta (dest,
       GST_INFERENCE_META_API_TYPE);
 
   if (!dmeta) {
     /* If meta doesn't exist, copy it */
-    Prediction *root = smeta->prediction;
     dmeta =
         (GstInferenceMeta *) gst_buffer_add_meta (dest, GST_INFERENCE_META_INFO,
         NULL);
 
     /* Copy root Prediction first */
-    dmeta->prediction = gst_inference_prediction_copy (root, dmeta->prediction);
+    dmeta->prediction =
+        gst_inference_prediction_copy (sroot, dmeta->prediction);
+
     if (!dmeta->prediction) {
       GST_ERROR ("Prediction copy failed");
       return FALSE;
@@ -548,11 +602,15 @@ gst_inference_meta_transfer (GstBuffer * dest,
       Prediction *droot = dmeta->prediction;
 
       /* Copy node children recursively */
-      g_node_children_foreach (root->node, G_TRAVERSE_ALL,
+      g_node_children_foreach (sroot->node, G_TRAVERSE_ALL,
           gst_inference_children_copy, droot->node);
     }
   } else {
-    /* TODO: Transfer the meta */
+    /* Transfer the meta */
+    droot = dmeta->prediction;
+
+    g_node_traverse (droot->node, G_LEVEL_ORDER, G_TRAVERSE_ALL, -1,
+        gst_inference_transfer_prediction, sroot);
   }
 
   return TRUE;
